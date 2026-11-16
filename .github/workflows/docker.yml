@@ -15,6 +15,11 @@ jobs:
   build:
     name: Build (${{ matrix.image.short }}/${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
+    # The published namespaces (windshiftapp/*) only accept pushes from the
+    # canonical repository; forks get a permission_denied from ghcr.io, so
+    # skip the whole publish pipeline outside Windshiftapp/core. Forks
+    # publish their own images via build-on-merge.yml.
+    if: github.event.repository.fork == false
     permissions:
       contents: read
       packages: write
