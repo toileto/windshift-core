@@ -220,6 +220,7 @@ export default {
     "roadmapUnscheduledHint_one": "{count} Vorgang benötigt Daten – wählen Sie seine Zeitachsenzeile, um ihn zu planen.",
     "roadmapUnscheduledHint_other": "{count} Vorgänge benötigen Daten – wählen Sie eine Zeitachsenzeile, um sie zu planen.",
     "swimlaneMoveFailed": "Der Vorgang konnte nicht in diese Swimlane verschoben werden.",
+    "projectUpdateFailed": "Das Projekt dieser Karte konnte nicht aktualisiert werden.",
     "workspaceFilterReason": "der aktuelle Arbeitsbereich-Filter",
   },
   "common": {

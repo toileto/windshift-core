@@ -647,6 +647,15 @@ export default {
       milestoneSwimlanes: 'Grouper les cartes par jalon',
       milestoneSwimlanesHint:
         'Les visiteurs voient des couloirs de jalons. Ils ne peuvent ni changer le regroupement ni déplacer les cartes.',
+      groupBy: 'Grouper les cartes par',
+      groupByHint:
+        'Les visiteurs publics voient le regroupement sélectionné. Ils ne peuvent ni changer le regroupement ni déplacer les cartes.',
+      groupByFlat: 'Aucun regroupement',
+      groupByMilestone: 'Jalon',
+      groupByAssignee: 'Responsable',
+      groupByStatus: 'Statut',
+      groupByProject: 'Projet',
+      groupByCustomer: 'Client → Projet',
       scopeNote:
         'La requête de la collection doit inclure une portée workspaceKey. Vous devez être administrateur de chaque espace de travail référencé.',
       save: 'Enregistrer le partage',
@@ -761,6 +770,7 @@ export default {
     boardItemsTruncated: 'Certains éléments du tableau sont masqués. Sélectionnez « Charger plus » pour tous les afficher.',
     combinedBoardMoveUnsupported: 'Changez le couloir et le statut séparément.',
     swimlaneMoveFailed: 'Impossible de déplacer l’élément vers ce couloir.',
+    projectUpdateFailed: 'Impossible de mettre à jour le projet de cette carte.',
     manual_sort_unavailable_title: 'Tri manuel indisponible',
     manual_sort_unavailable: 'Passez au mode Rang pour organiser les cartes manuellement.',
     // Board card dependency hover summary

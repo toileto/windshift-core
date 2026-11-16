@@ -828,6 +828,15 @@ export default {
       milestoneSwimlanes: 'Grupuj karty według kamienia milowego',
       milestoneSwimlanesHint:
         'Publiczni widzowie widzą tory kamieni milowych. Nie mogą przełączać grupowania ani przeciągać kart.',
+      groupBy: 'Grupuj karty według',
+      groupByHint:
+        'Publiczni widzowie widzą wybrane grupowanie. Nie mogą zmieniać grupowania ani przenosić kart.',
+      groupByFlat: 'Bez grupowania',
+      groupByMilestone: 'Kamień milowy',
+      groupByAssignee: 'Wykonawca',
+      groupByStatus: 'Status',
+      groupByProject: 'Projekt',
+      groupByCustomer: 'Klient → Projekt',
       scopeNote:
         'Zapytanie kolekcji musi zawierać zakres workspaceKey. Musisz być administratorem przestrzeni roboczej we wszystkich wskazanych przestrzeniach roboczych.',
       save: 'Zapisz udostępnianie',
@@ -959,6 +968,7 @@ export default {
     boardItemsTruncated: 'Niektóre elementy tablicy są ukryte. Wybierz „Wczytaj więcej”, aby wyświetlić wszystkie.',
     combinedBoardMoveUnsupported: 'Zmień tor i status osobno.',
     swimlaneMoveFailed: 'Nie udało się przenieść elementu do tego toru.',
+    projectUpdateFailed: 'Nie udało się zaktualizować projektu tej karty.',
     itemTypeLaneHint: 'Tor {type}',
     itemTypeLaneUnassignedHint: 'Elementy bez elementu nadrzędnego {type}',
     itemTypeLaneUnassignedVisibleHint: 'Elementy bez widocznego elementu nadrzędnego {type}',

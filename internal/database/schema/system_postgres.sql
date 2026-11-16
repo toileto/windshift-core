@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS collections (
 	is_public BOOLEAN DEFAULT false,
 	is_private BOOLEAN NOT NULL DEFAULT false,
 	public_milestone_swimlanes BOOLEAN NOT NULL DEFAULT false,
+	public_group_by TEXT NOT NULL DEFAULT '',
 	workspace_id INTEGER,
 	category_id INTEGER,
 	created_by INTEGER,

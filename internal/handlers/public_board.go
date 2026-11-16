@@ -32,6 +32,7 @@ var publicBoardCardFieldAllowlist = map[string]struct{}{
 	"story_points": {},
 	"due_date":     {},
 	"labels":       {},
+	"project":      {},
 }
 
 func filterPublicBoardCardFields(fields []models.ListColumn) []models.ListColumn {
@@ -90,9 +91,28 @@ type publicBoardCard struct {
 	Labels         []publicLabel `json:"labels,omitempty"`
 	MilestoneIDs   []int         `json:"milestone_ids,omitempty"`
 	DueDate        string        `json:"due_date,omitempty"`
+	StatusID       *int          `json:"status_id,omitempty"`
 	StatusName     string        `json:"status_name,omitempty"`
 	ItemTypeName   string        `json:"item_type_name,omitempty"`
 	StoryPoints    *float64      `json:"story_points,omitempty"`
+	ProjectID      *int          `json:"project_id,omitempty"`
+	ProjectName    string        `json:"project_name,omitempty"`
+	// LaneKey places the card in a grouped public board lane
+	// ("assignee-3", "status-12", "project-5" or "none").
+	LaneKey string `json:"lane_key,omitempty"`
+
+	// Customer derived from the card's effective project; unexported so the
+	// lane builder can group by customer without serializing it per card.
+	customerID   *int
+	customerName string
+}
+
+// publicBoardLane is one swimlane header on a grouped public board. Customer
+// grouping nests project lanes under their customer via Children.
+type publicBoardLane struct {
+	Key      string            `json:"key"`
+	Title    string            `json:"title"`
+	Children []publicBoardLane `json:"children,omitempty"`
 }
 
 type publicMilestone struct {
@@ -120,15 +140,20 @@ type publicBoardResponse struct {
 		Name        string `json:"name"`
 		Description string `json:"description"`
 	} `json:"collection"`
-	Columns     []publicColumn      `json:"columns"`
-	CardFields  []models.ListColumn `json:"card_fields,omitempty"`
-	Swimlanes   bool                `json:"swimlanes"`
-	Milestones  []publicMilestone   `json:"milestones,omitempty"`
-	TotalItems  int                 `json:"total_items"`
-	LoadedItems int                 `json:"loaded_items"`
-	Truncated   bool                `json:"truncated"`
-	ItemLimit   int                 `json:"item_limit"`
-	UpdatedAt   string              `json:"updated_at"`
+	Columns    []publicColumn      `json:"columns"`
+	CardFields []models.ListColumn `json:"card_fields,omitempty"`
+	Swimlanes  bool                `json:"swimlanes"`
+	Milestones []publicMilestone   `json:"milestones,omitempty"`
+	// GroupBy is the configured grouping ("", "milestone", "assignee",
+	// "status" or "project"); Lanes carries the ordered lane headers for the
+	// non-milestone dimensions.
+	GroupBy     string            `json:"group_by,omitempty"`
+	Lanes       []publicBoardLane `json:"lanes,omitempty"`
+	TotalItems  int               `json:"total_items"`
+	LoadedItems int               `json:"loaded_items"`
+	Truncated   bool              `json:"truncated"`
+	ItemLimit   int               `json:"item_limit"`
+	UpdatedAt   string            `json:"updated_at"`
 }
 
 type publicComment struct {
@@ -285,11 +310,12 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 	var collectionID int
 	var collectionName, collectionDescription, qlQuery, updatedAt string
 	var publicMilestoneSwimlanes bool
+	var publicGroupBy string
 	err := h.db.QueryRow(`
-		SELECT id, name, COALESCE(description, ''), COALESCE(ql_query, ''), public_milestone_swimlanes, updated_at
+		SELECT id, name, COALESCE(description, ''), COALESCE(ql_query, ''), public_milestone_swimlanes, public_group_by, updated_at
 		FROM collections
 		WHERE public_slug = ? AND is_public = true AND is_private = false AND public_slug IS NOT NULL
-	`, slug).Scan(&collectionID, &collectionName, &collectionDescription, &qlQuery, &publicMilestoneSwimlanes, &updatedAt)
+	`, slug).Scan(&collectionID, &collectionName, &collectionDescription, &qlQuery, &publicMilestoneSwimlanes, &publicGroupBy, &updatedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		respondNotFound(w, r, "board")
@@ -298,6 +324,18 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		respondInternalError(w, r, err)
 		return
+	}
+
+	// Explicit grouping wins; boards shared before the column existed keep the
+	// legacy milestone flag. Unknown stored values degrade to a flat board.
+	effectiveGroupBy := publicGroupBy
+	switch effectiveGroupBy {
+	case "", "milestone", "assignee", "status", "project":
+	default:
+		effectiveGroupBy = ""
+	}
+	if effectiveGroupBy == "" && publicMilestoneSwimlanes {
+		effectiveGroupBy = "milestone"
 	}
 
 	// Load board configuration for this collection
@@ -371,7 +409,7 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 	}
 	if len(scopedWorkspaceIDs) == 0 {
 		// No workspaces, return empty board
-		resp := h.buildEmptyResponse(collectionName, collectionDescription, columns, cardFields, updatedAt, publicMilestoneSwimlanes)
+		resp := h.buildEmptyResponse(collectionName, collectionDescription, columns, cardFields, updatedAt, effectiveGroupBy)
 		respondJSONOK(w, resp)
 		return
 	}
@@ -398,7 +436,7 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 	// projection.
 	var publicMilestones []publicMilestone
 	itemMilestoneIDs := make(map[int][]int)
-	if publicMilestoneSwimlanes {
+	if effectiveGroupBy == "milestone" {
 		if err := repository.NewMilestoneAttachRepository(h.db).LoadForItems(items); err != nil {
 			respondInternalError(w, r, err)
 			return
@@ -454,6 +492,20 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Project grouping follows inheritance: an item with inherit_project set
+	// sits in its parent's project lane, resolved over the loaded items.
+	effectiveProjects := resolvePublicEffectiveProjects(items)
+
+	// Customer lanes resolve each effective project to its customer org.
+	var projectCustomers map[int]publicProjectCustomer
+	if effectiveGroupBy == "customer" {
+		projectCustomers, err = h.loadProjectCustomers(effectiveProjects)
+		if err != nil {
+			respondInternalError(w, r, err)
+			return
+		}
+	}
+
 	// Group items by column
 	for _, item := range items {
 		if item.StatusID == nil {
@@ -476,10 +528,29 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 			PriorityColor:  item.PriorityColor,
 			AssigneeName:   item.AssigneeName,
 			AssigneeAvatar: item.AssigneeAvatar,
+			StatusID:       item.StatusID,
 			StatusName:     item.StatusName,
 			ItemTypeName:   item.ItemTypeName,
 			StoryPoints:    item.StoryPoints,
 			MilestoneIDs:   itemMilestoneIDs[item.ID],
+		}
+
+		if effective := effectiveProjects[item.ID]; effective != nil {
+			id := effective.id
+			card.ProjectID = &id
+			card.ProjectName = effective.name
+		} else if item.ProjectID != nil && !item.InheritProject {
+			card.ProjectID = item.ProjectID
+			card.ProjectName = item.ProjectName
+		}
+		card.LaneKey = publicLaneKeyForCard(effectiveGroupBy, &item, effectiveProjects[item.ID])
+		if effectiveGroupBy == "customer" {
+			if effective := effectiveProjects[item.ID]; effective != nil {
+				if customer, ok := projectCustomers[effective.id]; ok && !customer.noCustomer {
+					card.customerID = &customer.id
+					card.customerName = customer.name
+				}
+			}
 		}
 
 		if item.DueDate != nil {
@@ -494,11 +565,20 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 		responseColumns[colIdx].Items = append(responseColumns[colIdx].Items, card)
 	}
 
+	var groupLanes []publicBoardLane
+	if effectiveGroupBy == "customer" {
+		groupLanes = buildCustomerBoardLanes(responseColumns)
+	} else {
+		groupLanes = buildPublicBoardLanes(effectiveGroupBy, columns, responseColumns)
+	}
+
 	resp := publicBoardResponse{
 		Columns:     responseColumns,
 		CardFields:  cardFields,
-		Swimlanes:   publicMilestoneSwimlanes,
+		Swimlanes:   effectiveGroupBy == "milestone",
 		Milestones:  publicMilestones,
+		GroupBy:     effectiveGroupBy,
+		Lanes:       groupLanes,
 		TotalItems:  totalItems,
 		LoadedItems: len(items),
 		Truncated:   totalItems > len(items),
@@ -509,6 +589,392 @@ func (h *PublicBoardHandler) GetPublicBoard(w http.ResponseWriter, r *http.Reque
 	resp.Collection.Description = collectionDescription
 
 	respondJSONOK(w, resp)
+}
+
+// publicEffectiveProject is the resolved direct project for one item.
+type publicEffectiveProject struct {
+	id   int
+	name string
+}
+
+// resolvePublicEffectiveProjects walks inherit_project up the loaded parent
+// chain so grouped lanes match what the item detail shows. The parent may be
+// outside the loaded page; an unresolvable inherit falls back to no project.
+func resolvePublicEffectiveProjects(items []models.Item) map[int]*publicEffectiveProject {
+	byID := make(map[int]*models.Item, len(items))
+	for i := range items {
+		byID[items[i].ID] = &items[i]
+	}
+
+	result := make(map[int]*publicEffectiveProject, len(items))
+	visiting := make(map[int]bool, len(items))
+	var resolve func(item *models.Item) *publicEffectiveProject
+	resolve = func(item *models.Item) *publicEffectiveProject {
+		if cached, ok := result[item.ID]; ok {
+			return cached
+		}
+		if visiting[item.ID] {
+			return nil
+		}
+		visiting[item.ID] = true
+		defer delete(visiting, item.ID)
+
+		var out *publicEffectiveProject
+		switch {
+		case item.ProjectID != nil && !item.InheritProject:
+			out = &publicEffectiveProject{id: *item.ProjectID, name: item.ProjectName}
+		case !item.InheritProject:
+			out = nil
+		case item.ParentID != nil && *item.ParentID != item.ID:
+			if parent, ok := byID[*item.ParentID]; ok {
+				out = resolve(parent)
+			}
+		}
+		result[item.ID] = out
+		return out
+	}
+	for i := range items {
+		resolve(&items[i])
+	}
+	return result
+}
+
+// publicLaneKeyForCard derives the card's swimlane key for grouped boards.
+// Flat and milestone boards leave it empty; milestone grouping keeps its own
+// milestone_ids-based derivation in the frontend. Customer grouping buckets
+// cards by their project — the customer container is derived in the lane
+// builder — so its keys match the project dimension.
+func publicLaneKeyForCard(groupBy string, item *models.Item, effective *publicEffectiveProject) string {
+	switch groupBy {
+	case "assignee":
+		if item.AssigneeID == nil {
+			return "none"
+		}
+		return "assignee-" + itoa(*item.AssigneeID)
+	case "status":
+		if item.StatusID == nil {
+			return "none"
+		}
+		return "status-" + itoa(*item.StatusID)
+	case "project", "customer":
+		if effective == nil {
+			return "none"
+		}
+		return "project-" + itoa(effective.id)
+	default:
+		return ""
+	}
+}
+
+// publicProjectCustomer is the customer organisation behind one project. The
+// built-in no-customer placeholder org counts as "no customer".
+type publicProjectCustomer struct {
+	id         int
+	name       string
+	noCustomer bool
+}
+
+// loadProjectCustomers resolves every effective project on the board to its
+// customer organisation with two IN-queries.
+func (h *PublicBoardHandler) loadProjectCustomers(effective map[int]*publicEffectiveProject) (map[int]publicProjectCustomer, error) {
+	seen := make(map[int]bool, len(effective))
+	projectIDs := make([]int, 0, len(effective))
+	for _, project := range effective {
+		if project == nil || seen[project.id] {
+			continue
+		}
+		seen[project.id] = true
+		projectIDs = append(projectIDs, project.id)
+	}
+	result := make(map[int]publicProjectCustomer, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return result, nil
+	}
+
+	projectArgs := make([]any, len(projectIDs))
+	for i, id := range projectIDs {
+		projectArgs[i] = id
+	}
+	projectPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(projectIDs)), ",")
+
+	rows, err := h.db.Query(
+		"SELECT id, customer_id FROM time_projects WHERE id IN ("+projectPlaceholders+")",
+		projectArgs...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load project customers: %w", err)
+	}
+	projectToCustomer := make(map[int]int, len(projectIDs))
+	for rows.Next() {
+		var projectID int
+		var customerID sql.NullInt64
+		if err := rows.Scan(&projectID, &customerID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan project customer: %w", err)
+		}
+		if customerID.Valid {
+			projectToCustomer[projectID] = int(customerID.Int64)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	seenCustomers := make(map[int]bool, len(projectToCustomer))
+	customerIDs := make([]int, 0, len(projectToCustomer))
+	for _, customerID := range projectToCustomer {
+		if seenCustomers[customerID] {
+			continue
+		}
+		seenCustomers[customerID] = true
+		customerIDs = append(customerIDs, customerID)
+	}
+	if len(customerIDs) == 0 {
+		return result, nil
+	}
+
+	customerArgs := make([]any, len(customerIDs))
+	for i, id := range customerIDs {
+		customerArgs[i] = id
+	}
+	customerPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(customerIDs)), ",")
+	crows, err := h.db.Query(
+		"SELECT id, name, COALESCE(builtin_key, '') FROM customer_organisations WHERE id IN ("+customerPlaceholders+")",
+		customerArgs...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load customers: %w", err)
+	}
+	customers := make(map[int]publicProjectCustomer, len(customerIDs))
+	for crows.Next() {
+		var id int
+		var name, builtinKey string
+		if err := crows.Scan(&id, &name, &builtinKey); err != nil {
+			_ = crows.Close()
+			return nil, fmt.Errorf("scan customer: %w", err)
+		}
+		customers[id] = publicProjectCustomer{
+			id:         id,
+			name:       name,
+			noCustomer: builtinKey == "no_customer",
+		}
+	}
+	if err := crows.Err(); err != nil {
+		_ = crows.Close()
+		return nil, err
+	}
+	_ = crows.Close()
+
+	for projectID, customerID := range projectToCustomer {
+		if customer, ok := customers[customerID]; ok {
+			result[projectID] = customer
+		}
+	}
+	return result, nil
+}
+
+// buildCustomerBoardLanes nests project lanes under their customer: one
+// container lane per customer with a child lane per distinct project, both
+// ordered by name; the no-customer container and the projectless lane sort
+// last. Containers without cards cannot occur — they are derived from cards.
+func buildCustomerBoardLanes(responseColumns []publicColumn) []publicBoardLane {
+	type childLane struct {
+		key   string
+		title string
+	}
+	type container struct {
+		key      string
+		title    string
+		children []childLane
+		seen     map[string]bool
+	}
+
+	containers := make(map[string]*container)
+	add := func(customerKey, customerTitle, laneKey, laneTitle string) {
+		bucket := containers[customerKey]
+		if bucket == nil {
+			bucket = &container{key: customerKey, title: customerTitle, seen: make(map[string]bool)}
+			containers[customerKey] = bucket
+		}
+		if bucket.seen[laneKey] {
+			return
+		}
+		bucket.seen[laneKey] = true
+		bucket.children = append(bucket.children, childLane{key: laneKey, title: laneTitle})
+	}
+
+	for _, column := range responseColumns {
+		for _, card := range column.Items {
+			laneKey := card.LaneKey
+			if laneKey == "" {
+				laneKey = "none"
+			}
+			laneTitle := card.ProjectName
+			if laneKey == "none" {
+				laneTitle = "No project"
+			} else if laneTitle == "" {
+				laneTitle = "Project #" + strings.TrimPrefix(laneKey, "project-")
+			}
+
+			customerKey, customerTitle := "customer-none", "No customer"
+			if card.customerID != nil {
+				customerKey = "customer-" + itoa(*card.customerID)
+				customerTitle = card.customerName
+				if customerTitle == "" {
+					customerTitle = "Customer #" + itoa(*card.customerID)
+				}
+			}
+			add(customerKey, customerTitle, laneKey, laneTitle)
+		}
+	}
+
+	ordered := make([]*container, 0, len(containers))
+	for _, bucket := range containers {
+		ordered = append(ordered, bucket)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].key == "customer-none" {
+			return false
+		}
+		if ordered[j].key == "customer-none" {
+			return true
+		}
+		if ordered[i].title != ordered[j].title {
+			return ordered[i].title < ordered[j].title
+		}
+		return ordered[i].key < ordered[j].key
+	})
+
+	lanes := make([]publicBoardLane, 0, len(ordered))
+	for _, bucket := range ordered {
+		children := bucket.children
+		sort.Slice(children, func(i, j int) bool {
+			if children[i].key == "none" {
+				return false
+			}
+			if children[j].key == "none" {
+				return true
+			}
+			if children[i].title != children[j].title {
+				return children[i].title < children[j].title
+			}
+			return children[i].key < children[j].key
+		})
+		childLanes := make([]publicBoardLane, 0, len(children))
+		for _, entry := range children {
+			childLanes = append(childLanes, publicBoardLane{Key: entry.key, Title: entry.title})
+		}
+		lanes = append(lanes, publicBoardLane{
+			Key:      bucket.key,
+			Title:    bucket.title,
+			Children: childLanes,
+		})
+	}
+	return lanes
+}
+
+// buildPublicBoardLanes builds the ordered lane headers for a grouped public
+// board. Only lanes that contain at least one card are emitted; a trailing
+// "none" lane collects cards without a value.
+func buildPublicBoardLanes(groupBy string, columns []boardColumnInfo, responseColumns []publicColumn) []publicBoardLane {
+	countCards := func(predicate func(publicBoardCard) bool) int {
+		total := 0
+		for _, col := range responseColumns {
+			for _, card := range col.Items {
+				if predicate(card) {
+					total++
+				}
+			}
+		}
+		return total
+	}
+
+	switch groupBy {
+	case "assignee", "project":
+		titles := make(map[string]string)
+		for _, col := range responseColumns {
+			for _, card := range col.Items {
+				key := card.LaneKey
+				if key == "" || key == "none" {
+					continue
+				}
+				if _, ok := titles[key]; !ok {
+					if groupBy == "assignee" {
+						if card.AssigneeName != "" {
+							titles[key] = card.AssigneeName
+						} else {
+							titles[key] = "Unassigned"
+						}
+					} else if card.ProjectName != "" {
+						titles[key] = card.ProjectName
+					} else {
+						titles[key] = "Project #" + strings.TrimPrefix(key, "project-")
+					}
+				}
+			}
+		}
+		lanes := make([]publicBoardLane, 0, len(titles)+1)
+		for key, title := range titles {
+			lanes = append(lanes, publicBoardLane{Key: key, Title: title})
+		}
+		sort.Slice(lanes, func(i, j int) bool {
+			if lanes[i].Title != lanes[j].Title {
+				return lanes[i].Title < lanes[j].Title
+			}
+			return lanes[i].Key < lanes[j].Key
+		})
+		if countCards(func(card publicBoardCard) bool {
+			return card.LaneKey == "" || card.LaneKey == "none"
+		}) > 0 {
+			lanes = append(lanes, publicBoardLane{Key: "none", Title: "Unassigned"})
+		}
+		return lanes
+	case "status":
+		titlesByKey := make(map[string]string)
+		for _, col := range responseColumns {
+			for _, card := range col.Items {
+				if card.LaneKey == "" || card.LaneKey == "none" {
+					continue
+				}
+				if card.StatusName != "" {
+					titlesByKey[card.LaneKey] = card.StatusName
+				}
+			}
+		}
+		lanes := make([]publicBoardLane, 0, len(titlesByKey))
+		emitted := make(map[string]bool, len(titlesByKey))
+		// Board column order is the canonical status order for this view.
+		for _, col := range columns {
+			for _, statusID := range col.statusIDs {
+				key := "status-" + itoa(statusID)
+				title, ok := titlesByKey[key]
+				if !ok || emitted[key] {
+					continue
+				}
+				emitted[key] = true
+				lanes = append(lanes, publicBoardLane{Key: key, Title: title})
+			}
+		}
+		// Statuses outside every column cannot occur, but never drop a card.
+		var leftover []publicBoardLane
+		for key, title := range titlesByKey {
+			if emitted[key] {
+				continue
+			}
+			leftover = append(leftover, publicBoardLane{Key: key, Title: title})
+		}
+		sort.Slice(leftover, func(i, j int) bool {
+			if leftover[i].Title != leftover[j].Title {
+				return leftover[i].Title < leftover[j].Title
+			}
+			return leftover[i].Key < leftover[j].Key
+		})
+		return append(lanes, leftover...)
+	default:
+		return nil
+	}
 }
 
 // boardColumnInfo holds column data loaded from the DB
@@ -685,10 +1151,11 @@ func (h *PublicBoardHandler) loadItemLabels(items []models.Item) map[int][]publi
 	return result
 }
 
-func (h *PublicBoardHandler) buildEmptyResponse(name, desc string, columns []boardColumnInfo, cardFields []models.ListColumn, updatedAt string, swimlanes bool) publicBoardResponse {
+func (h *PublicBoardHandler) buildEmptyResponse(name, desc string, columns []boardColumnInfo, cardFields []models.ListColumn, updatedAt string, groupBy string) publicBoardResponse {
 	resp := publicBoardResponse{
 		CardFields: cardFields,
-		Swimlanes:  swimlanes,
+		Swimlanes:  groupBy == "milestone",
+		GroupBy:    groupBy,
 		ItemLimit:  publicBoardItemLimit,
 		UpdatedAt:  updatedAt,
 	}

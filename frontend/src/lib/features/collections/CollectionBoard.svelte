@@ -25,12 +25,21 @@
     statusIsCompleted,
   } from './boardColumns.js';
   import {
+    BOARD_GROUP_BY_ASSIGNEE,
+    BOARD_GROUP_BY_CUSTOMER,
     BOARD_GROUP_BY_ITEM_TYPE,
     BOARD_GROUP_BY_MILESTONE,
+    BOARD_GROUP_BY_PROJECT,
+    BOARD_GROUP_BY_STATUS,
     MILESTONE_HIDDEN_COMPLETED_KEY,
     MILESTONE_OPEN_FROM_COMPLETED_KEY,
     boardGroupPreferenceStorageKey,
+    boardLaneKeyForItem,
     buildBoardSwimlanes,
+    createCustomerResolver,
+    createEffectiveProjectResolver,
+    customerLaneKeyForItem,
+    isValueGroupByDimension,
     legacyBoardGroupItemTypeStorageKey,
     milestonesFromItems,
     resolveStoredBoardGroupBy,
@@ -806,6 +815,45 @@
   );
   let boardGroupingActive = $derived(Boolean(boardGroupBy));
 
+  // Effective (inheritance-resolved) project per card, shared by lane
+  // building, drop handling and the card's project editor.
+  let effectiveProjectFor = $derived(createEffectiveProjectResolver(items));
+
+  // Customer derived through the effective project, for customer lanes.
+  let resolveCustomerFor = $derived(createCustomerResolver(projects, effectiveProjectFor));
+
+  function laneKeyForItemDim(item, dimension) {
+    return boardLaneKeyForItem(item, dimension, {
+      milestones: milestoneLanesReference,
+      resolveEffectiveProject: effectiveProjectFor,
+    });
+  }
+
+  function valueLaneHint(dimension) {
+    if (dimension === BOARD_GROUP_BY_ASSIGNEE) return t('boardControls.assigneeLaneHint');
+    if (dimension === BOARD_GROUP_BY_STATUS) return t('boardControls.statusLaneHint');
+    return t('boardControls.projectLaneHint');
+  }
+
+  // Assign a time project to a card from its board chip. The chip is the
+  // board's project editor, so any card can gain or change a project without
+  // opening the detail modal.
+  async function handleCardProjectEdit(item, value) {
+    try {
+      const updatedItem = await itemsApi.update(item.id, value);
+      const project =
+        value.project_id != null ? projects.find((candidate) => candidate.id === value.project_id) : null;
+      collectionStore.patchItem(item.id, {
+        ...updatedItem,
+        ...value,
+        project_name: project ? project.name : value.project_id != null ? updatedItem?.project_name || '' : '',
+      });
+    } catch (error) {
+      console.error('Failed to update card project:', error);
+      warningToast(error?.message || t('collections.projectUpdateFailed'));
+    }
+  }
+
   function getItemsByStatus(statusId, itemSubset = filteredItems) {
     return itemSubset.filter(
       item => boardStatusIdForItem(item, validColumns, personalWorkspaceIds) === statusId
@@ -814,7 +862,11 @@
 
   function parseLaneTarget(element) {
     const dimension = element?.dataset?.swimlaneDimension || '';
-    if (dimension !== BOARD_GROUP_BY_ITEM_TYPE && dimension !== BOARD_GROUP_BY_MILESTONE) {
+    if (
+      dimension !== BOARD_GROUP_BY_ITEM_TYPE &&
+      dimension !== BOARD_GROUP_BY_MILESTONE &&
+      !isValueGroupByDimension(dimension)
+    ) {
       return null;
     }
     return {
@@ -862,12 +914,20 @@
 
   function wouldChangeBoardLane(item, target) {
     if (!boardGroupBy || !target) return false;
-    if (target.dimension === BOARD_GROUP_BY_ITEM_TYPE) {
+    // Customer grouping drops land on its project sub-lanes, so the target
+    // dimension is the project while the active grouping is customer.
+    const dimension = target.dimension;
+    const supported =
+      dimension === boardGroupBy.dimension ||
+      (boardGroupBy.dimension === BOARD_GROUP_BY_CUSTOMER &&
+        isValueGroupByDimension(dimension));
+    if (!supported) return false;
+    if (dimension === BOARD_GROUP_BY_ITEM_TYPE) {
       const targetParentId =
         target.key === SWIMLANE_NONE_KEY ? null : Number(String(target.key).split('-').pop());
       return (item.parent_id ?? null) !== targetParentId;
     }
-    if (target.dimension === BOARD_GROUP_BY_MILESTONE) {
+    if (dimension === BOARD_GROUP_BY_MILESTONE) {
       // Aggregate lanes are not milestone assignments; a drop there keeps the
       // card's milestone and only changes its column/rank.
       if (
@@ -877,6 +937,9 @@
         return false;
       }
       return milestoneLaneKeyForItem(item) !== target.key;
+    }
+    if (isValueGroupByDimension(dimension)) {
+      return laneKeyForItemDim(item, dimension) !== target.key;
     }
     return false;
   }
@@ -910,6 +973,17 @@
         return boardSwimlanes.find((entry) => entry.key === lane.key)?.items ?? [];
       }
       return filteredItems.filter((item) => milestoneLaneKeyForItem(item) === lane.key);
+    }
+
+    // Lanes dispatch on their own dimension: customer grouping has container
+    // bands plus project sub-lanes, and value dimensions match by lane key.
+    if (lane?.dimension === BOARD_GROUP_BY_CUSTOMER) {
+      return filteredItems.filter(
+        (item) => customerLaneKeyForItem(item, resolveCustomerFor) === lane.key
+      );
+    }
+    if (lane && isValueGroupByDimension(lane.dimension)) {
+      return filteredItems.filter((item) => laneKeyForItemDim(item, lane.dimension) === lane.key);
     }
 
     return filteredItems;
@@ -977,6 +1051,42 @@
     }
   }
 
+  async function updateItemValueLane(item, target) {
+    const dimension = target.dimension;
+    if (dimension === BOARD_GROUP_BY_STATUS) {
+      // Status lanes follow the column's transition; nothing to assign here.
+      return item;
+    }
+    if (dimension !== BOARD_GROUP_BY_ASSIGNEE && dimension !== BOARD_GROUP_BY_PROJECT) {
+      return item;
+    }
+    if (!wouldChangeBoardLane(item, target)) return item;
+
+    const targetId = target.key === SWIMLANE_NONE_KEY ? null : Number(String(target.key).split('-').pop());
+    const patch =
+      dimension === BOARD_GROUP_BY_ASSIGNEE
+        ? { assignee_id: Number.isFinite(targetId) ? targetId : null }
+        : { project_id: Number.isFinite(targetId) ? targetId : null, inherit_project: false };
+
+    try {
+      const updatedItem = await itemsApi.update(item.id, patch);
+      const project =
+        dimension === BOARD_GROUP_BY_PROJECT && patch.project_id != null
+          ? projects.find((candidate) => candidate.id === patch.project_id)
+          : null;
+      collectionStore.patchItem(item.id, {
+        ...updatedItem,
+        ...patch,
+        ...(project ? { project_name: project.name } : patch.project_id == null ? { project_name: '' } : {}),
+      });
+      return { ...item, ...updatedItem, ...patch };
+    } catch (error) {
+      console.error('Failed to move item to swimlane:', error);
+      warningToast(t('collections.swimlaneMoveFailed'));
+      throw markSwimlaneMoveFailed(error);
+    }
+  }
+
   async function applyLaneTarget(item, target) {
     if (!boardGroupBy || !target) return item;
     if (boardGroupBy.dimension === BOARD_GROUP_BY_ITEM_TYPE) {
@@ -984,6 +1094,15 @@
     }
     if (boardGroupBy.dimension === BOARD_GROUP_BY_MILESTONE) {
       return updateItemMilestoneLane(item, target);
+    }
+    if (
+      isValueGroupByDimension(boardGroupBy.dimension) ||
+      (boardGroupBy.dimension === BOARD_GROUP_BY_CUSTOMER &&
+        isValueGroupByDimension(target.dimension))
+    ) {
+      // Customer lanes drop onto their project sub-lanes; the update follows
+      // the target lane's own dimension.
+      return updateItemValueLane(item, target);
     }
     return item;
   }
@@ -1188,12 +1307,25 @@
       ? itemTypes.find(type => type.id === boardGroupBy.itemTypeId) ?? null
       : null
   );
+  let valueGroupByLabel = $derived(
+    boardGroupBy?.dimension === BOARD_GROUP_BY_ASSIGNEE
+      ? t('boardControls.assigneeSwimlanes')
+      : boardGroupBy?.dimension === BOARD_GROUP_BY_STATUS
+        ? t('boardControls.statusSwimlanes')
+        : boardGroupBy?.dimension === BOARD_GROUP_BY_PROJECT
+          ? t('boardControls.projectSwimlanes')
+          : boardGroupBy?.dimension === BOARD_GROUP_BY_CUSTOMER
+            ? t('boardControls.customerSwimlanes')
+            : null
+  );
   let selectedGroupByLabel = $derived(
     boardGroupBy?.dimension === BOARD_GROUP_BY_MILESTONE
       ? t('boardControls.milestoneSwimlanes')
-      : selectedGroupByItemType
-        ? t('boardControls.groupByValue', { name: selectedGroupByItemType.name })
-        : t('boardControls.groupBy')
+      : valueGroupByLabel
+        ? t('boardControls.groupByValue', { name: valueGroupByLabel })
+        : selectedGroupByItemType
+          ? t('boardControls.groupByValue', { name: selectedGroupByItemType.name })
+          : t('boardControls.groupBy')
   );
 
   let hiddenRightmostSwimlaneParentCount = $derived.by(() => {
@@ -1246,6 +1378,38 @@
         selected: boardGroupBy?.dimension === BOARD_GROUP_BY_MILESTONE,
         onClick: () => setBoardGroupBy({ dimension: BOARD_GROUP_BY_MILESTONE })
       },
+      {
+        id: 'group-assignee',
+        testid: 'board-group-by-assignee',
+        title: t('boardControls.assigneeSwimlanes'),
+        subtitle: t('boardControls.assigneeSwimlanesDescription'),
+        selected: boardGroupBy?.dimension === BOARD_GROUP_BY_ASSIGNEE,
+        onClick: () => setBoardGroupBy({ dimension: BOARD_GROUP_BY_ASSIGNEE })
+      },
+      {
+        id: 'group-status',
+        testid: 'board-group-by-status',
+        title: t('boardControls.statusSwimlanes'),
+        subtitle: t('boardControls.statusSwimlanesDescription'),
+        selected: boardGroupBy?.dimension === BOARD_GROUP_BY_STATUS,
+        onClick: () => setBoardGroupBy({ dimension: BOARD_GROUP_BY_STATUS })
+      },
+      {
+        id: 'group-project',
+        testid: 'board-group-by-project',
+        title: t('boardControls.projectSwimlanes'),
+        subtitle: t('boardControls.projectSwimlanesDescription'),
+        selected: boardGroupBy?.dimension === BOARD_GROUP_BY_PROJECT,
+        onClick: () => setBoardGroupBy({ dimension: BOARD_GROUP_BY_PROJECT })
+      },
+      {
+        id: 'group-customer',
+        testid: 'board-group-by-customer',
+        title: t('boardControls.customerSwimlanes'),
+        subtitle: t('boardControls.customerSwimlanesDescription'),
+        selected: boardGroupBy?.dimension === BOARD_GROUP_BY_CUSTOMER,
+        onClick: () => setBoardGroupBy({ dimension: BOARD_GROUP_BY_CUSTOMER })
+      },
       ...(boardGroupBy?.dimension === BOARD_GROUP_BY_ITEM_TYPE ? [
         { id: 'group-rightmost-toggle-divider', type: 'divider' },
         {
@@ -1288,6 +1452,10 @@
       items,
       filteredItems,
       milestones: milestoneLanesReference,
+      users,
+      statuses,
+      projects,
+      resolveEffectiveProject: effectiveProjectFor,
       statusIdForItem: (item) =>
         boardStatusIdForItem(item, validColumns, personalWorkspaceIds),
       rightmostStatusIds: rightmostBoardColumnStatusIds,
@@ -1301,9 +1469,26 @@
           Number(boardStatusIdForItem(item, validColumns, personalWorkspaceIds))
         ),
       unassignedTitle: t('common.unassigned'),
+      noCustomerTitle: t('time.noCustomer'),
+      noProjectTitle: t('items.noProject'),
       hiddenCompletedTitle: t('boardControls.completedMilestones'),
       openFromCompletedTitle: t('boardControls.openFromCompletedMilestones'),
       allItemsTitle: t('collections.allItems'),
+    })
+  );
+
+  // Flat render order: customer containers render as a band header directly
+  // followed by their project sub-lanes, so the template iterates one list.
+  // A collapsed container keeps its band header and drops the sub-lanes; a
+  // collapsed sub-lane keeps its header and hides only the grid.
+  let boardRenderLanes = $derived(
+    boardSwimlanes.flatMap((lane) => {
+      if (!lane.childLanes) return [lane];
+      if (!isSwimlaneExpanded(lane.id)) return [lane];
+      return [
+        lane,
+        ...lane.childLanes.map((child) => ({ ...child, containerId: lane.id })),
+      ];
     })
   );
 
@@ -1331,7 +1516,9 @@
   );
   let boardColumnModel = $derived(
     buildBoardColumnModel({
-      lanes: boardSwimlanes,
+      // Customer lanes add container bands; column buckets and keyboard
+      // navigation run on the leaf lanes the cards actually live in.
+      lanes: boardSwimlanes.flatMap((lane) => lane.childLanes ?? [lane]),
       columns: validColumns,
       statusIdForItem: (item) => boardStatusIdForItem(item, validColumns, personalWorkspaceIds),
       sortMode,
@@ -2183,7 +2370,7 @@
           class={boardGroupingActive ? 'space-y-4' : ''}
           data-testid="board-view"
         >
-          {#each boardSwimlanes as lane (lane.id)}
+          {#each boardRenderLanes as lane (lane.id)}
             {@const laneExpanded = isSwimlaneExpanded(lane.id)}
             <!-- No type can legally be created under this lane's item (the lane
                  groups by the lowest hierarchy level), so the column loses its
@@ -2191,8 +2378,11 @@
             {@const laneQuickAddTypes = quickAddTypesFor(lane.parent ?? null)}
             <section
               class={boardGroupingActive ? 'rounded-lg border overflow-hidden' : ''}
-              style={boardGroupingActive ? `${styles.glassStyle?.(10) ?? ''} border-color: var(--ctx-border, var(--ds-border));` : ''}
+              style={boardGroupingActive
+                ? `${styles.glassStyle?.(10) ?? ''} border-color: var(--ctx-border, var(--ds-border));${lane.containerId ? ' margin-left: 1.25rem; border-left: 3px solid var(--ds-border);' : ''}`
+                : ''}
               data-board-swimlane={lane.id}
+              data-container-swimlane={lane.containerId ?? ''}
               data-testid={`board-lane-${lane.id}`}
             >
               {#if boardGroupingActive}
@@ -2245,11 +2435,19 @@
                             {t('collections.milestoneLaneHint')}
                           {/if}
                         </span>
-                      {:else}
+                      {:else if lane.dimension === BOARD_GROUP_BY_ITEM_TYPE}
                         <span class="block text-xs font-normal truncate" style="color: var(--ds-text-subtle);">
                           {excludeRightmostSwimlaneParents
                             ? t('collections.itemTypeLaneUnassignedVisibleHint', { type: selectedGroupByItemType?.name ?? '' })
                             : t('collections.itemTypeLaneUnassignedHint', { type: selectedGroupByItemType?.name ?? '' })}
+                        </span>
+                      {:else if lane.dimension === BOARD_GROUP_BY_CUSTOMER}
+                        <span class="block text-xs font-normal truncate" style="color: var(--ds-text-subtle);">
+                          {t('boardControls.customerLaneHint')}
+                        </span>
+                      {:else if isValueGroupByDimension(lane.dimension) && !lane.isUnassigned}
+                        <span class="block text-xs font-normal truncate" style="color: var(--ds-text-subtle);">
+                          {valueLaneHint(lane.dimension)}
                         </span>
                       {/if}
                     </span>
@@ -2260,7 +2458,7 @@
                 </div>
               {/if}
 
-              {#if !boardGroupingActive || laneExpanded}
+              {#if !lane.isContainer && (!boardGroupingActive || laneExpanded)}
                 <div class="grid gap-6 {boardGroupingActive ? 'p-4' : ''}" style="grid-template-columns: {boardGridTemplate()};">
                   {#each validColumns as column (column.id)}
                     {@const columnModel = boardColumnsByLane.get(lane.id).get(column.id)}
@@ -2381,6 +2579,8 @@
                                 onselect={selection.toggleSelected}
                                 onshiftselect={selectRangeTo}
                                 onopen={openItem}
+                                oneditproject={canDragCard ? handleCardProjectEdit : null}
+                                resolveEffectiveProject={effectiveProjectFor}
                                 registerElement={registerBoardCardElement}
                               />
                             {/each}

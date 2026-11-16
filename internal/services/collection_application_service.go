@@ -60,12 +60,16 @@ type CollectionUpdate struct {
 	// PublicMilestoneSwimlanesSet distinguishes an omitted patch field from false.
 	PublicMilestoneSwimlanesSet bool
 	PublicMilestoneSwimlanes    bool
+	// PublicGroupBySet distinguishes an omitted patch field from "" (flat).
+	PublicGroupBySet bool
+	PublicGroupBy    string
 }
 
 type CollectionSharingUpdate struct {
 	IsPublic                 bool
 	PublicSlug               *string
 	PublicMilestoneSwimlanes *bool
+	PublicGroupBy            *string
 }
 
 type CollectionCategoryPatch struct {
@@ -330,6 +334,12 @@ func (s *CollectionApplicationService) Update(actor AuditActor, id int, update C
 	if update.PublicMilestoneSwimlanesSet {
 		collection.PublicMilestoneSwimlanes = update.PublicMilestoneSwimlanes
 	}
+	if update.PublicGroupBySet {
+		collection.PublicGroupBy = update.PublicGroupBy
+		// Keep the legacy milestone flag in sync so older API consumers and
+		// already-shared boards keep grouping by milestone consistently.
+		collection.PublicMilestoneSwimlanes = update.PublicGroupBy == "milestone"
+	}
 	// Private overrides public sharing: a collection marked private must never
 	// stay anonymously readable at its public slug.
 	if collection.IsPrivate {
@@ -406,10 +416,18 @@ func (s *CollectionApplicationService) UpdateSharing(actor AuditActor, id int, u
 	if update.PublicMilestoneSwimlanes != nil {
 		publicMilestoneSwimlanes = *update.PublicMilestoneSwimlanes
 	}
+	publicGroupBy := collection.PublicGroupBy
+	if update.PublicGroupBy != nil {
+		if !validPublicGroupBy(*update.PublicGroupBy) {
+			return nil, collectionValidation("public_group_by must be one of \"\", \"milestone\", \"assignee\", \"status\", \"project\", \"customer\"")
+		}
+		publicGroupBy = *update.PublicGroupBy
+		publicMilestoneSwimlanes = publicGroupBy == "milestone"
+	}
 	// Publishing is conditional on the authorized scope still being current, so
 	// a query edit between authorization and this write cannot make an
 	// unauthorized scope anonymously readable.
-	updated, err := s.repository.UpdatePublicSharing(id, update.IsPublic, update.PublicSlug, publicMilestoneSwimlanes, collection.QLQuery, collection.WorkspaceID)
+	updated, err := s.repository.UpdatePublicSharing(id, update.IsPublic, update.PublicSlug, publicMilestoneSwimlanes, publicGroupBy, collection.QLQuery, collection.WorkspaceID)
 	if err != nil {
 		if database.IsUniqueConstraintError(err) {
 			return nil, ErrCollectionConflict
@@ -540,12 +558,26 @@ func sanitizeCollectionModel(collection *models.Collection) error {
 	collection.Name = sanitize.PlainTextField.Sanitize(collection.Name)
 	collection.Description = sanitize.RichText.Sanitize(collection.Description)
 	collection.QLQuery = sanitize.QueryText.Sanitize(collection.QLQuery)
+	if !validPublicGroupBy(collection.PublicGroupBy) {
+		return collectionValidation("public_group_by must be one of \"\", \"milestone\", \"assignee\", \"status\", \"project\", \"customer\"")
+	}
 	if collection.FilterState != nil {
 		if err := sanitize.ValidateJSONPayload("filter_state", *collection.FilterState); err != nil {
 			return collectionValidation(err.Error())
 		}
 	}
 	return nil
+}
+
+// validPublicGroupBy reports whether value is a supported public-board
+// swimlane grouping. "" means flat (no swimlanes).
+func validPublicGroupBy(value string) bool {
+	switch value {
+	case "", "milestone", "assignee", "status", "project", "customer":
+		return true
+	default:
+		return false
+	}
 }
 
 func collectionValidation(message string) error {

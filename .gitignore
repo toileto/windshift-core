@@ -38,6 +38,11 @@ cx
 !frontend/src/lib/mobile/mobile-i18n.spec.js
 !frontend/scripts/hardcoded-i18n-ast.spec.js
 !frontend/src/lib/api/integrations.spec.js
+
+# Regression coverage for the board-group-by feature ships with the
+# implementation (public regression coverage exception).
+!internal/handlers/public_board_grouping_test.go
+!frontend/src/lib/features/collections/boardSwimlanes.spec.js
 !frontend/src/lib/features/items/zammadPanelContext.spec.js
 !frontend/src/lib/features/items/ZammadLinkResolver.spec.js
 !internal/repository/zammad_repository_test.go

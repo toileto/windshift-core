@@ -297,6 +297,7 @@
       category_id: currentCollection.category_id ?? null,
       is_private: currentCollection.is_private ?? false,
       public_milestone_swimlanes: currentCollection.public_milestone_swimlanes ?? false,
+      public_group_by: currentCollection.public_group_by ?? '',
       ...overrides,
     };
   }
@@ -318,7 +319,7 @@
     }
   }
 
-  async function handlePublicSharingSave({ isPublic, publicSlug, publicMilestoneSwimlanes }) {
+  async function handlePublicSharingSave({ isPublic, publicSlug, publicGroupBy, publicMilestoneSwimlanes }) {
     if (!currentCollection) return { ok: false, error: 'Collection not found.' };
     savingPublicSharing = true;
     try {
@@ -326,6 +327,7 @@
         is_public: isPublic,
         public_slug: publicSlug,
         public_milestone_swimlanes: isPublic ? publicMilestoneSwimlanes === true : false,
+        public_group_by: isPublic ? publicGroupBy || '' : '',
       });
       await collections.update(currentCollection.id, update);
       currentCollection = {
@@ -335,6 +337,7 @@
         is_public: isPublic,
         public_slug: publicSlug,
         public_milestone_swimlanes: update.public_milestone_swimlanes,
+        public_group_by: update.public_group_by,
       };
       slugSaved = Boolean(isPublic && publicSlug);
       return { ok: true };
@@ -485,6 +488,7 @@
       isPublic={currentCollection?.is_public || false}
       publicSlug={currentCollection?.public_slug || null}
       publicMilestoneSwimlanes={currentCollection?.public_milestone_swimlanes || false}
+      publicGroupBy={currentCollection?.public_group_by || ''}
       {slugSaved}
       saving={savingPublicSharing}
       onpublicsave={handlePublicSharingSave}

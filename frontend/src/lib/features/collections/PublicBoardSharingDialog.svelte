@@ -6,6 +6,7 @@
   import CopyButton from '../../components/CopyButton.svelte';
   import DescriptionText from '../../components/DescriptionText.svelte';
   import Input from '../../components/Input.svelte';
+  import NativeSelect from '../../components/NativeSelect.svelte';
   import DialogFooter from '../../dialogs/DialogFooter.svelte';
   import Modal from '../../dialogs/Modal.svelte';
   import ModalHeader from '../../dialogs/ModalHeader.svelte';
@@ -19,6 +20,7 @@
     isPublic = false,
     publicSlug = null,
     publicMilestoneSwimlanes = false,
+    publicGroupBy = '',
     slugSaved = false,
     saving = false,
     onclose = null,
@@ -27,16 +29,22 @@
 
   let draftIsPublic = $state(false);
   let draftSlug = $state('');
-  let draftPublicMilestoneSwimlanes = $state(false);
+  let draftPublicGroupBy = $state('');
   let saveError = $state('');
   let wasOpen = false;
+
+  // Current persisted grouping: the explicit column wins, the legacy milestone
+  // flag maps to milestone grouping.
+  const currentGroupBy = $derived(
+    publicGroupBy || (publicMilestoneSwimlanes ? 'milestone' : '')
+  );
 
   const normalizedSlug = $derived(draftSlug.trim());
   const slugIsValid = $derived(/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(normalizedSlug));
   const hasChanges = $derived(
     draftIsPublic !== isPublic ||
       normalizedSlug !== (publicSlug || '') ||
-      draftPublicMilestoneSwimlanes !== publicMilestoneSwimlanes
+      draftPublicGroupBy !== currentGroupBy
   );
   const persistedUrlAvailable = $derived(
     isPublic && slugSaved && normalizedSlug === (publicSlug || '')
@@ -49,7 +57,7 @@
     if (isOpen && !wasOpen) {
       draftIsPublic = isPublic;
       draftSlug = publicSlug || '';
-      draftPublicMilestoneSwimlanes = publicMilestoneSwimlanes;
+      draftPublicGroupBy = currentGroupBy;
       saveError = '';
     }
     wasOpen = isOpen;
@@ -65,7 +73,8 @@
     const result = await onsave?.({
       isPublic: draftIsPublic,
       publicSlug: normalizedSlug || null,
-      publicMilestoneSwimlanes: draftIsPublic ? draftPublicMilestoneSwimlanes : false,
+      publicGroupBy: draftIsPublic ? draftPublicGroupBy : '',
+      publicMilestoneSwimlanes: draftIsPublic ? draftPublicGroupBy === 'milestone' : false,
     });
     if (result?.ok === false) {
       saveError = result.error || t('collections.publicBoardSharing.saveError');
@@ -159,14 +168,30 @@
         class="rounded-lg border p-4"
         style="border-color: var(--ds-border); background-color: var(--ds-surface);"
       >
-        <Checkbox
-          id="public-board-milestone-swimlanes-input"
-          checked={draftPublicMilestoneSwimlanes}
-          onchange={(checked) => (draftPublicMilestoneSwimlanes = checked)}
-          label={t('collections.publicBoardSharing.milestoneSwimlanes')}
-          hint={t('collections.publicBoardSharing.milestoneSwimlanesHint')}
-          dataTestid="public-board-milestone-swimlanes"
+        <label
+          for="public-board-group-by"
+          class="mb-1.5 block text-sm font-medium"
+          style="color: var(--ds-text);"
+        >
+          {t('collections.publicBoardSharing.groupBy')}
+        </label>
+        <NativeSelect
+          id="public-board-group-by"
+          dataTestid="public-board-group-by"
+          value={draftPublicGroupBy}
+          options={[
+            { value: '', label: t('collections.publicBoardSharing.groupByFlat') },
+            { value: 'milestone', label: t('collections.publicBoardSharing.groupByMilestone') },
+            { value: 'assignee', label: t('collections.publicBoardSharing.groupByAssignee') },
+            { value: 'status', label: t('collections.publicBoardSharing.groupByStatus') },
+            { value: 'project', label: t('collections.publicBoardSharing.groupByProject') },
+            { value: 'customer', label: t('collections.publicBoardSharing.groupByCustomer') },
+          ]}
+          onchange={(value) => (draftPublicGroupBy = value)}
         />
+        <DescriptionText variant="subtlest">
+          {t('collections.publicBoardSharing.groupByHint')}
+        </DescriptionText>
       </div>
     {/if}
 

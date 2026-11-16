@@ -25,6 +25,95 @@
     new Set((board?.card_fields || []).map(f => f.field_identifier))
   );
 
+  // Owner-configured grouping for the non-milestone dimensions (assignee,
+  // status, project, customer). Read-only: public viewers cannot toggle
+  // grouping, and only lanes that actually contain cards are rendered.
+  let valueGroupLanes = $derived.by(() => {
+    const groupBy = board?.group_by;
+    if (!groupBy || groupBy === 'milestone' || !board?.lanes?.length) return null;
+
+    const buckets = board.columns.map(() => new Map());
+    const counts = new Map();
+    board.columns.forEach((column, columnIndex) => {
+      for (const card of column.items) {
+        const key = card.lane_key || 'none';
+        const bucket = buckets[columnIndex].get(key) || [];
+        bucket.push(card);
+        buckets[columnIndex].set(key, bucket);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    });
+
+    const columnsFor = (key) =>
+      board.columns.map((column, columnIndex) => ({
+        column,
+        items: buckets[columnIndex].get(key) || [],
+      }));
+
+    // Customer grouping nests project lanes under their customer container.
+    if (board.lanes.some((lane) => lane.children?.length)) {
+      const covered = new Set();
+      const lanes = [];
+      for (const container of board.lanes) {
+        const childLanes = (container.children || [])
+          .map((child) => {
+            covered.add(child.key);
+            return {
+              key: child.key,
+              title: child.title,
+              count: counts.get(child.key) || 0,
+              columns: columnsFor(child.key),
+            };
+          })
+          .filter((child) => child.count > 0);
+        if (childLanes.length === 0) continue;
+        lanes.push({
+          key: container.key,
+          title: container.title,
+          count: childLanes.reduce((total, child) => total + child.count, 0),
+          columns: [],
+          childLanes,
+        });
+      }
+      // Cards whose lane key the backend did not order still render, in a
+      // trailing flat lane, instead of disappearing.
+      for (const [key, count] of counts) {
+        if (covered.has(key) || count === 0) continue;
+        lanes.push({
+          key,
+          title: key === 'none' ? 'Unassigned' : key,
+          count,
+          columns: columnsFor(key),
+        });
+      }
+      return lanes.length > 0 ? lanes : null;
+    }
+
+    const lanes = board.lanes
+      .map((lane) => ({
+        key: lane.key,
+        title: lane.title,
+        count: counts.get(lane.key) || 0,
+        columns: columnsFor(lane.key),
+      }))
+      .filter((lane) => lane.count > 0);
+
+    // Cards whose lane key the backend did not order still render, in a
+    // trailing lane, instead of disappearing.
+    const ordered = new Set(board.lanes.map((lane) => lane.key));
+    for (const [key, count] of counts) {
+      if (ordered.has(key) || count === 0) continue;
+      lanes.push({
+        key,
+        title: key === 'none' ? 'Unassigned' : key,
+        count,
+        columns: columnsFor(key),
+      });
+    }
+
+    return lanes.length > 0 ? lanes : null;
+  });
+
   // Owner-configured milestone lanes. Read-only: public viewers cannot toggle
   // grouping, and only lanes that actually contain cards are rendered.
   let publicSwimlanes = $derived.by(() => {
@@ -82,6 +171,10 @@
 
     return lanes.length > 0 ? lanes : null;
   });
+
+  // Lane source for the board body: the owner's configured grouping wins, the
+  // legacy milestone flag still renders milestone lanes, otherwise flat.
+  let displayLanes = $derived(valueGroupLanes ?? publicSwimlanes);
 
   // Whether to show a field on cards
   function showField(fieldId) {
@@ -294,6 +387,15 @@
               {/each}
             {/if}
 
+            {#if showField('project') && card.project_name}
+              <span
+                style="font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--ds-surface-sunken); color: var(--ds-text-subtle);"
+                title="Project"
+              >
+                {card.project_name}
+              </span>
+            {/if}
+
             <div style="flex: 1;"></div>
 
             {#if showField('assignee') && card.assignee_name}
@@ -353,9 +455,9 @@
         </div>
       {/snippet}
 
-      {#if publicSwimlanes}
+      {#if displayLanes}
         <div data-testid="public-board-swimlanes">
-          {#each publicSwimlanes as lane (lane.key)}
+          {#each displayLanes as lane (lane.key)}
             <section
               data-testid={`public-board-lane-${lane.key}`}
               style="margin-bottom: 24px;"
@@ -378,10 +480,40 @@
                   {lane.count}
                 </span>
               </div>
-              <div class="board-columns" style="display: flex; gap: 16px; min-height: 120px;">
-                {#each lane.columns as { column, items } (column.name)}
-                  {@render publicColumn(column, items)}
-                {/each}
+              <div
+                class="board-columns"
+                style="display: flex; gap: 16px; min-height: 120px;{lane.childLanes ? ' flex-direction: column;' : ''}"
+              >
+                {#if lane.childLanes}
+                  <!-- Customer grouping: project lanes nest under the customer. -->
+                  {#each lane.childLanes as child (child.key)}
+                    <div
+                      data-testid={`public-board-child-lane-${child.key}`}
+                      style="margin-left: 16px; border-left: 3px solid var(--ds-border); padding-left: 12px; flex: 1; min-width: 0;"
+                    >
+                      <div
+                        style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;"
+                      >
+                        <span style="font-size: 13px; font-weight: 600;">{child.title}</span>
+                        <span
+                          data-testid={`public-board-child-lane-count-${child.key}`}
+                          style="font-size: 12px; color: var(--ds-text-subtle); background: var(--ds-surface-sunken); padding: 1px 7px; border-radius: 10px;"
+                        >
+                          {child.count}
+                        </span>
+                      </div>
+                      <div class="board-columns" style="display: flex; gap: 16px;">
+                        {#each child.columns as { column, items } (column.name)}
+                          {@render publicColumn(column, items)}
+                        {/each}
+                      </div>
+                    </div>
+                  {/each}
+                {:else}
+                  {#each lane.columns as { column, items } (column.name)}
+                    {@render publicColumn(column, items)}
+                  {/each}
+                {/if}
               </div>
             </section>
           {/each}
