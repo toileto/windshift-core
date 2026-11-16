@@ -217,6 +217,7 @@ export default {
     "roadmapUnscheduledHint_one": "{count} 个事项需要日期——选择其时间线行以安排它。",
     "roadmapUnscheduledHint_other": "{count} 个事项需要日期——选择时间线行以安排它们。",
     "swimlaneMoveFailed": "无法将事项移动到该泳道。",
+    "projectUpdateFailed": "无法更新该卡片的项目。",
     "workspaceFilterReason": "当前工作区筛选条件",
   },
   "common": {

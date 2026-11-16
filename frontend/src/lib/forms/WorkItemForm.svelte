@@ -479,8 +479,9 @@
       />
     {/if}
 
-    <!-- Project Chip -->
-    {#if store.isFieldConfigured('project') && !store.isFieldRequired('project')}
+    <!-- Project Chip. Project is a board grouping dimension, so the create
+         form always offers it regardless of screen configuration. -->
+    {#if !store.isFieldRequired('project')}
       <ChipPicker
         value={store.formData.project_id}
         items={[{ id: null, name: t('common.none') }, ...store.timeProjects]}

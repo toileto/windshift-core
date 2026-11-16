@@ -51,6 +51,11 @@
     onselect = null,
     onshiftselect = null,
     onopen = null,
+    // Present only when the viewer may edit: opens the project picker for the
+    // card's Project chip so a project can be assigned without the modal.
+    oneditproject = null,
+    // Inheritance-aware project resolver shared with the board's grouping.
+    resolveEffectiveProject = null,
   } = $props();
 
   const resolvedMoveMenuItems = $derived(
@@ -149,6 +154,14 @@
   function handleCardClick(event) {
     // The card owns the click, but a menu trigger inside it does not.
     if (isMenuTriggerEvent(event)) return;
+    // Inline pickers (the Project chip) open their own popover; the click must
+    // not also open the card.
+    if (
+      event.target instanceof Element &&
+      event.target.closest('[role="combobox"]') !== null
+    ) {
+      return;
+    }
     if (selectionMode && onselect) {
       event.preventDefault();
       onselect(item.id, event);
@@ -250,6 +263,8 @@
               {labels}
               {customFieldDefinitions}
               {users}
+              {oneditproject}
+              {resolveEffectiveProject}
             />
           {/each}
         </div>

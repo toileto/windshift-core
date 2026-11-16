@@ -59,12 +59,14 @@ type collectionPatchRequest struct {
 	IsPrivate                Optional[bool]   `json:"is_private"`
 	PublicSlug               Optional[string] `json:"public_slug"`
 	PublicMilestoneSwimlanes Optional[bool]   `json:"public_milestone_swimlanes"`
+	PublicGroupBy            Optional[string] `json:"public_group_by"`
 }
 
 type collectionSharingRequest struct {
 	IsPublic                 Optional[bool]   `json:"is_public"`
 	PublicSlug               Optional[string] `json:"public_slug"`
 	PublicMilestoneSwimlanes Optional[bool]   `json:"public_milestone_swimlanes"`
+	PublicGroupBy            Optional[string] `json:"public_group_by"`
 }
 
 type collectionCategoryPatchRequest struct {
@@ -236,6 +238,8 @@ func updateCollection(collections collectionApplication) jsonOperation[collectio
 			PublicSlugSet: input.PublicSlug.Set, PublicSlug: optionalString(input.PublicSlug),
 			PublicMilestoneSwimlanesSet: input.PublicMilestoneSwimlanes.Set,
 			PublicMilestoneSwimlanes:    input.PublicMilestoneSwimlanes.Value,
+			PublicGroupBySet:            input.PublicGroupBy.Set,
+			PublicGroupBy:               input.PublicGroupBy.Value,
 		})
 		if updated == nil {
 			return models.Collection{}, collectionError(err)
@@ -261,6 +265,7 @@ func updateCollectionSharing(collections collectionApplication) jsonOperation[co
 			IsPublic:                 input.IsPublic.Value,
 			PublicSlug:               optionalString(input.PublicSlug),
 			PublicMilestoneSwimlanes: optionalBool(input.PublicMilestoneSwimlanes),
+			PublicGroupBy:            optionalString(input.PublicGroupBy),
 		})
 		if updated == nil {
 			return models.Collection{}, collectionError(err)

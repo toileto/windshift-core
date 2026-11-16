@@ -444,6 +444,13 @@
       seen.add(ident);
       out.push(ident);
     }
+    // Project is a board grouping dimension and must stay settable on every
+    // item, so it is surfaced even when the workspace screen omits it.
+    if (!seen.has('project')) {
+      const assigneeAt = out.indexOf('assignee');
+      if (assigneeAt >= 0) out.splice(assigneeAt, 0, 'project');
+      else out.push('project');
+    }
     return out;
   });
 
@@ -799,7 +806,7 @@
             config={projectConfig}
             placeholder={t('pickers.selectProject')}
             showUnassigned={false}
-            disabled={!canEdit || !isSystemFieldEditable('project')}
+            disabled={!canEdit}
             class="w-full"
             onSelect={(selectedProject) => {
               // Handle special items

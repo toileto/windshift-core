@@ -814,6 +814,15 @@ export default {
       milestoneSwimlanes: 'Group cards by milestone',
       milestoneSwimlanesHint:
         'Public viewers see milestone swimlanes. They cannot toggle grouping or drag cards.',
+      groupBy: 'Group cards by',
+      groupByHint:
+        'Public viewers see the selected grouping. They cannot toggle grouping or drag cards.',
+      groupByFlat: 'No grouping',
+      groupByMilestone: 'Milestone',
+      groupByAssignee: 'Assignee',
+      groupByStatus: 'Status',
+      groupByProject: 'Project',
+      groupByCustomer: 'Customer → Project',
       scopeNote:
         'The collection query must include a workspaceKey scope. You must be a workspace administrator in every referenced workspace.',
       save: 'Save sharing',
@@ -943,6 +952,7 @@ export default {
     boardItemsTruncated: 'Some board items are hidden. Select “Load more” to display them all.',
     combinedBoardMoveUnsupported: 'Change the swimlane and status separately.',
     swimlaneMoveFailed: 'Could not move the item to that swimlane.',
+    projectUpdateFailed: 'Could not update the project for that card.',
     itemTypeLaneHint: '{type} swimlane',
     itemTypeLaneUnassignedHint: 'Items without a {type} parent',
     itemTypeLaneUnassignedVisibleHint: 'Items without a visible {type} parent',

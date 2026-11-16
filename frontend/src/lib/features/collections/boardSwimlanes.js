@@ -8,11 +8,41 @@
 // - milestone: one lane per milestone using the item's primary milestone, plus
 //   a trailing unassigned lane
 
-import { primaryLaneKeyForItem, SWIMLANE_NONE_KEY, sortMilestonesForLanes } from './swimlanes.js';
+import { NO_CUSTOMER_BUILTIN_KEY } from '../../utils/customerLabel.js';
+import {
+  laneKeyForItem,
+  primaryLaneKeyForItem,
+  SWIMLANE_NONE_KEY,
+  sortMilestonesForLanes,
+} from './swimlanes.js';
 
 export const BOARD_GROUP_BY_NONE = 'none';
 export const BOARD_GROUP_BY_ITEM_TYPE = 'item-type';
 export const BOARD_GROUP_BY_MILESTONE = 'milestone';
+export const BOARD_GROUP_BY_ASSIGNEE = 'assignee';
+export const BOARD_GROUP_BY_STATUS = 'status';
+export const BOARD_GROUP_BY_PROJECT = 'project';
+// Container dimension: a customer lane holding project sub-lanes.
+export const BOARD_GROUP_BY_CUSTOMER = 'customer';
+
+// Dimensions serialized as their plain name (no auxiliary id).
+const PLAIN_GROUP_BY_DIMENSIONS = new Set([
+  BOARD_GROUP_BY_MILESTONE,
+  BOARD_GROUP_BY_ASSIGNEE,
+  BOARD_GROUP_BY_STATUS,
+  BOARD_GROUP_BY_PROJECT,
+  BOARD_GROUP_BY_CUSTOMER,
+]);
+
+// Dimensions whose lanes are value buckets (one lane per distinct value plus
+// an unassigned lane) instead of entity parents.
+export function isValueGroupByDimension(dimension) {
+  return (
+    dimension === BOARD_GROUP_BY_ASSIGNEE ||
+    dimension === BOARD_GROUP_BY_STATUS ||
+    dimension === BOARD_GROUP_BY_PROJECT
+  );
+}
 
 // Lane key for cards whose completed milestone lane is hidden by the board
 // configuration. The lane keeps those cards visible instead of dropping them.
@@ -40,7 +70,7 @@ export function legacyBoardGroupItemTypeStorageKey(scope) {
 
 export function serializeBoardGroupBy(groupBy) {
   if (!groupBy) return null;
-  if (groupBy.dimension === BOARD_GROUP_BY_MILESTONE) return BOARD_GROUP_BY_MILESTONE;
+  if (PLAIN_GROUP_BY_DIMENSIONS.has(groupBy.dimension)) return groupBy.dimension;
   if (groupBy.dimension === BOARD_GROUP_BY_ITEM_TYPE && groupBy.itemTypeId != null) {
     return `type:${groupBy.itemTypeId}`;
   }
@@ -50,7 +80,7 @@ export function serializeBoardGroupBy(groupBy) {
 export function parseBoardGroupBy(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return null;
-  if (raw === BOARD_GROUP_BY_MILESTONE) return { dimension: BOARD_GROUP_BY_MILESTONE };
+  if (PLAIN_GROUP_BY_DIMENSIONS.has(raw)) return { dimension: raw };
   const typeMatch = /^type:(\d+)$/.exec(raw);
   if (typeMatch) {
     return { dimension: BOARD_GROUP_BY_ITEM_TYPE, itemTypeId: Number(typeMatch[1]) };
@@ -95,6 +125,202 @@ export function milestonesFromItems(items = []) {
     }
   }
   return sortMilestonesForLanes([...byId.values()]);
+}
+
+// Effective (inheritance-resolved) direct project for one item, mirroring the
+// backend: a direct project wins, inherit_project walks up the loaded parent
+// chain, an explicit no-project stays none, and an unloadable parent degrades
+// to none instead of hiding the card. Returns {id, name} | null.
+/**
+ * @param {Array<object>} [items]
+ * @returns {(item: object) => {id: number, name: string|null}|null}
+ */
+export function createEffectiveProjectResolver(items = []) {
+  const byId = new Map();
+  for (const item of items) byId.set(item.id, item);
+
+  const memo = new Map();
+  const visiting = new Set();
+
+  function resolve(item) {
+    if (!item) return null;
+    if (memo.has(item.id)) return memo.get(item.id);
+    if (visiting.has(item.id)) return null;
+    visiting.add(item.id);
+
+    let result = null;
+    if (item.project_id != null && !item.inherit_project) {
+      result = { id: item.project_id, name: item.project_name || null };
+    } else if (!item.inherit_project) {
+      result = null;
+    } else if (item.parent_id != null && item.parent_id !== item.id) {
+      result = resolve(byId.get(item.parent_id));
+    }
+
+    visiting.delete(item.id);
+    memo.set(item.id, result);
+    return result;
+  }
+
+  return (item) => resolve(item);
+}
+
+// Lane key for one card under the board's current grouping. Value dimensions
+// share swimlanes.js's keys; project grouping resolves inheritance first.
+/**
+ * @param {object} item
+ * @param {string|null} dimension
+ * @param {{milestones?: Array, resolveEffectiveProject?: (item: object) => {id: number, name: string|null}|null}} [options]
+ * @returns {string}
+ */
+export function boardLaneKeyForItem(
+  item,
+  dimension,
+  { milestones = [], resolveEffectiveProject } = {}
+) {
+  if (dimension === BOARD_GROUP_BY_MILESTONE) {
+    return primaryLaneKeyForItem(item, dimension, milestones);
+  }
+  if (dimension === BOARD_GROUP_BY_PROJECT) {
+    const project = resolveEffectiveProject ? resolveEffectiveProject(item) : null;
+    return project ? `project-${project.id}` : SWIMLANE_NONE_KEY;
+  }
+  return laneKeyForItem(item, dimension);
+}
+
+// Customer for a card, derived through its effective project. Projects
+// without a customer — and the built-in "no customer" placeholder org —
+// resolve to null so those cards collect in the no-customer container.
+/**
+ * @param {Array<object>} [projects]
+ * @param {(item: object) => {id: number, name: string|null}|null} [resolveEffectiveProject]
+ * @returns {(item: object) => {id: number, name: string|null}|null}
+ */
+export function createCustomerResolver(projects = [], resolveEffectiveProject = () => null) {
+  const projectById = new Map();
+  for (const project of projects || []) {
+    if (project?.id != null) projectById.set(Number(project.id), project);
+  }
+  return (item) => {
+    const project = resolveEffectiveProject(item);
+    if (!project) return null;
+    const reference = projectById.get(Number(project.id));
+    if (!reference) return null; // project unknown on this board → no customer
+    if (reference.customer_builtin_key === NO_CUSTOMER_BUILTIN_KEY) return null;
+    const customerId = reference.customer_id ?? null;
+    if (customerId == null) return null;
+    return { id: customerId, name: reference.customer_name || null };
+  };
+}
+
+// Container lane key for a card's customer, or the shared no-customer key.
+export function customerLaneKeyForItem(item, resolveCustomer) {
+  const customer = resolveCustomer ? resolveCustomer(item) : null;
+  return customer ? `customer-${customer.id}` : 'customer-none';
+}
+
+// Customer → project lanes: one container lane per customer, each holding a
+// project sub-lane per distinct effective project. Containers are display
+// bands only — cards and drop targets live on the project sub-lanes, whose
+// keys match the standalone project grouping so drops reuse its update path.
+/**
+ * @param {object} options
+ * @param {Array} options.filteredItems
+ * @param {(item: object) => {id: number, name: string|null}|null} [options.resolveEffectiveProject]
+ * @param {(item: object) => {id: number, name: string|null}|null} [options.resolveCustomer]
+ * @param {string} options.noCustomerTitle
+ * @param {string} options.noProjectTitle
+ */
+function customerProjectLanes({
+  filteredItems,
+  resolveEffectiveProject = () => null,
+  resolveCustomer = () => null,
+  noCustomerTitle,
+  noProjectTitle,
+}) {
+  /** @type {Map<string, {key: string, title: string|null, items: object[], projects: Map<string, {key: string, title: string|null, items: object[]}>}>} */
+  const containers = new Map();
+  const containerFor = (customer) => {
+    const key = customer ? `customer-${customer.id}` : 'customer-none';
+    let container = containers.get(key);
+    if (!container) {
+      container = {
+        key,
+        title: customer ? customer.name : noCustomerTitle,
+        items: [],
+        projects: new Map(),
+      };
+      containers.set(key, container);
+    }
+    return container;
+  };
+
+  for (const item of filteredItems) {
+    const container = containerFor(resolveCustomer(item));
+    const project = resolveEffectiveProject(item);
+    const projectKey = project ? `project-${project.id}` : SWIMLANE_NONE_KEY;
+    let lane = container.projects.get(projectKey);
+    if (!lane) {
+      lane = {
+        key: projectKey,
+        title: project
+          ? project.name
+          : item.project_name || (projectKey === SWIMLANE_NONE_KEY ? noProjectTitle : null),
+        items: [],
+      };
+      container.projects.set(projectKey, lane);
+    } else if (!lane.title && item.project_name) {
+      lane.title = item.project_name;
+    }
+    lane.items.push(item);
+    container.items.push(item);
+  }
+
+  const orderedContainers = [...containers.values()].sort((a, b) => {
+    if (a.key === 'customer-none') return 1;
+    if (b.key === 'customer-none') return -1;
+    return String(a.title || '').localeCompare(String(b.title || ''));
+  });
+
+  return orderedContainers.map((container) => {
+    const projectLanes = [...container.projects.values()]
+      .map((lane) => ({
+        id: lane.key,
+        key: lane.key,
+        dimension: BOARD_GROUP_BY_PROJECT,
+        title: lane.title || `Project #${String(lane.key).split('-').pop()}`,
+        parent: null,
+        milestone: null,
+        items: lane.items,
+        isDefault: false,
+        isUnassigned: lane.key === SWIMLANE_NONE_KEY,
+        itemCount: lane.items.length,
+        parentIsVisible: false,
+      }))
+      .sort((a, b) => {
+        if (a.isUnassigned) return 1;
+        if (b.isUnassigned) return -1;
+        const byTitle = String(a.title).localeCompare(String(b.title));
+        if (byTitle !== 0) return byTitle;
+        return String(a.key).localeCompare(String(b.key));
+      });
+
+    return {
+      id: container.key,
+      key: container.key,
+      dimension: BOARD_GROUP_BY_CUSTOMER,
+      title: container.title || noCustomerTitle,
+      parent: null,
+      milestone: null,
+      items: container.items,
+      isDefault: false,
+      isUnassigned: false,
+      isContainer: true,
+      itemCount: container.items.length,
+      parentIsVisible: false,
+      childLanes: projectLanes,
+    };
+  });
 }
 
 function unassignedLane(title, items, dimension) {
@@ -348,6 +574,127 @@ function milestoneLanes({
   return result;
 }
 
+// Lanes for the value dimensions (assignee, status, project): one lane per
+// distinct value plus a trailing unassigned lane. Reference lists order the
+// lanes; cards whose value is missing from the reference (cross-workspace
+// boards) still get a lane titled from the card itself.
+/**
+ * @param {object} options
+ * @param {string} options.dimension
+ * @param {Array} options.filteredItems
+ * @param {Array} [options.users]
+ * @param {Array} [options.statuses]
+ * @param {Array} [options.projects]
+ * @param {(item: object) => {id: number, name: string|null}|null} [options.resolveEffectiveProject]
+ * @param {string} options.unassignedTitle
+ */
+function valueLanes({
+  dimension,
+  filteredItems,
+  users = [],
+  statuses = [],
+  projects = [],
+  resolveEffectiveProject = () => null,
+  unassignedTitle,
+}) {
+  const bucket = new Map();
+  for (const item of filteredItems) {
+    const key = boardLaneKeyForItem(item, dimension, { resolveEffectiveProject });
+    const laneItems = bucket.get(key);
+    if (laneItems) laneItems.push(item);
+    else bucket.set(key, [item]);
+  }
+
+  const laneObjects = [];
+  const emitted = new Set();
+  const pushLane = (key, title, laneItems) => {
+    emitted.add(key);
+    laneObjects.push({
+      // The unassigned lane keeps the shared "unassigned" DOM/test id used by
+      // the milestone and item-type groupings.
+      id: key === SWIMLANE_NONE_KEY ? 'unassigned' : key,
+      key,
+      dimension,
+      title,
+      parent: null,
+      milestone: null,
+      items: laneItems,
+      isDefault: false,
+      isUnassigned: key === SWIMLANE_NONE_KEY,
+      itemCount: laneItems.length,
+      parentIsVisible: false,
+    });
+  };
+
+  // Reference-driven order: statuses in workflow order, users and projects
+  // alphabetically.
+  const reference = [];
+  if (dimension === BOARD_GROUP_BY_STATUS) {
+    for (const status of statuses) {
+      reference.push({
+        key: `status-${status.id}`,
+        title: status.display_name || status.name || `Status #${status.id}`,
+      });
+    }
+  } else if (dimension === BOARD_GROUP_BY_ASSIGNEE) {
+    const sorted = [...users].sort((a, b) =>
+      String(a.full_name || a.name || '').localeCompare(String(b.full_name || b.name || ''))
+    );
+    for (const user of sorted) {
+      reference.push({
+        key: `assignee-${user.id}`,
+        title: user.full_name || user.name || `User #${user.id}`,
+      });
+    }
+  } else if (dimension === BOARD_GROUP_BY_PROJECT) {
+    const sorted = [...projects].sort((a, b) =>
+      String(a.name || '').localeCompare(String(b.name || ''))
+    );
+    for (const project of sorted) {
+      reference.push({
+        key: `project-${project.id}`,
+        title: project.name || `Project #${project.id}`,
+      });
+    }
+  }
+  for (const entry of reference) {
+    const laneItems = bucket.get(entry.key);
+    if (!laneItems || laneItems.length === 0) continue;
+    pushLane(entry.key, entry.title, laneItems);
+  }
+
+  // Lanes not covered by the reference, titled from the cards themselves.
+  const fallbackLanes = [];
+  for (const [key, laneItems] of bucket) {
+    if (key === SWIMLANE_NONE_KEY || emitted.has(key) || laneItems.length === 0) continue;
+    const first = laneItems.find(Boolean);
+    let title;
+    if (dimension === BOARD_GROUP_BY_ASSIGNEE) {
+      title = first?.assignee_name || `User #${key.split('-').pop()}`;
+    } else if (dimension === BOARD_GROUP_BY_STATUS) {
+      title = first?.status_name || `Status #${key.split('-').pop()}`;
+    } else {
+      title =
+        resolveEffectiveProject(first)?.name ||
+        first?.project_name ||
+        `Project #${key.split('-').pop()}`;
+    }
+    fallbackLanes.push({ key, title, items: laneItems });
+  }
+  fallbackLanes.sort((a, b) => {
+    const byTitle = String(a.title).localeCompare(String(b.title));
+    if (byTitle !== 0) return byTitle;
+    return a.key.localeCompare(b.key);
+  });
+  for (const entry of fallbackLanes) pushLane(entry.key, entry.title, entry.items);
+
+  const unassignedItems = bucket.get(SWIMLANE_NONE_KEY) ?? [];
+  if (unassignedItems.length > 0) {
+    pushLane(SWIMLANE_NONE_KEY, unassignedTitle, unassignedItems);
+  }
+  return laneObjects;
+}
+
 function compareLaneDates(a, b) {
   const aDate = a?.target_date == null || a.target_date === '' ? null : String(a.target_date);
   const bDate = b?.target_date == null || b.target_date === '' ? null : String(b.target_date);
@@ -362,9 +709,13 @@ function compareLaneDates(a, b) {
  *
  * @param {object} options
  * @param {{dimension: string, itemTypeId?: number}|null} options.groupBy
- * @param {Array} options.items all loaded cards (used for item-type parent eligibility)
- * @param {Array} options.filteredItems cards after client filters
- * @param {Array} options.milestones milestone reference for lane headers/order
+ * @param {Array} [options.items] all loaded cards (used for item-type parent eligibility)
+ * @param {Array} [options.filteredItems] cards after client filters
+ * @param {Array} [options.milestones] milestone reference for lane headers/order
+ * @param {Array} [options.users] user reference for assignee lanes
+ * @param {Array} [options.statuses] status reference for status lanes
+ * @param {Array} [options.projects] time-project reference for project lanes
+ * @param {(item: object) => {id: number, name: string|null}|null} [options.resolveEffectiveProject]
  * @param {(item: object) => number|null} [options.statusIdForItem]
  * @param {Set<number>} [options.rightmostStatusIds]
  * @param {boolean} [options.excludeRightmostSwimlaneParents]
@@ -374,6 +725,8 @@ function compareLaneDates(a, b) {
  * @param {boolean} [options.showOpenFromCompletedMilestones] collect open items on completed milestones into a rescue lane
  * @param {(item: object) => boolean} [options.isItemOpen] whether a card is still open
  * @param {string} [options.unassignedTitle]
+ * @param {string} [options.noCustomerTitle] title of the no-customer container on customer lanes
+ * @param {string} [options.noProjectTitle] title of the projectless sub-lane on customer lanes
  * @param {string} [options.hiddenCompletedTitle] title of the aggregate lane for hidden completed milestones
  * @param {string} [options.openFromCompletedTitle] title of the rescue lane for open items on completed milestones
  * @param {string} [options.allItemsTitle]
@@ -383,6 +736,10 @@ export function buildBoardSwimlanes({
   items = [],
   filteredItems = items,
   milestones = [],
+  users = [],
+  statuses = [],
+  projects = [],
+  resolveEffectiveProject = () => null,
   statusIdForItem = (item) => item.status_id ?? null,
   rightmostStatusIds = new Set(),
   excludeRightmostSwimlaneParents = false,
@@ -392,6 +749,8 @@ export function buildBoardSwimlanes({
   showOpenFromCompletedMilestones = false,
   isItemOpen = defaultIsItemOpen,
   unassignedTitle = 'Unassigned',
+  noCustomerTitle = 'No customer',
+  noProjectTitle = 'No project',
   hiddenCompletedTitle = 'Completed milestones',
   openFromCompletedTitle = 'Open from completed milestones',
   allItemsTitle = 'All items',
@@ -438,6 +797,28 @@ export function buildBoardSwimlanes({
       rightmostStatusIds,
       statusIdForItem,
       unassignedTitle,
+    });
+  }
+
+  if (isValueGroupByDimension(groupBy.dimension)) {
+    return valueLanes({
+      dimension: groupBy.dimension,
+      filteredItems,
+      users,
+      statuses,
+      projects,
+      resolveEffectiveProject,
+      unassignedTitle,
+    });
+  }
+
+  if (groupBy.dimension === BOARD_GROUP_BY_CUSTOMER) {
+    return customerProjectLanes({
+      filteredItems,
+      resolveEffectiveProject,
+      resolveCustomer: createCustomerResolver(projects, resolveEffectiveProject),
+      noCustomerTitle,
+      noProjectTitle,
     });
   }
 

@@ -29,6 +29,7 @@
     isPublic = false,
     publicSlug = null,
     publicMilestoneSwimlanes = false,
+    publicGroupBy = '',
     onpublicsave = null,
     saving = false,
     slugSaved = false,
@@ -249,6 +250,7 @@
   {isPublic}
   {publicSlug}
   {publicMilestoneSwimlanes}
+  {publicGroupBy}
   {slugSaved}
   {saving}
   onclose={closePublicDialog}

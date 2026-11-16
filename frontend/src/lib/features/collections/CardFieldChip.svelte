@@ -1,8 +1,11 @@
 <script>
   import CalendarDays from '@lucide/svelte/icons/calendar-days';
   import Clock from '@lucide/svelte/icons/clock';
+  import Briefcase from '@lucide/svelte/icons/briefcase';
   import ParentChip from '../../components/ParentChip.svelte';
   import Chip from '../../components/Chip.svelte';
+  import ItemPicker from '../../pickers/ItemPicker.svelte';
+  import { projectPickerConfig } from '../../pickers/pickerConfigs.js';
   import { formatDate, formatDateOnly, formatDateShort, formatStatusAge } from '../../utils/dateFormatter.js';
   import { resolveOptionLabel, resolveOptionLabels } from '../../utils/optionUtils.js';
   import { durationToString } from '../../utils/timeUtils.js';
@@ -24,6 +27,12 @@
     labels = [],
     customFieldDefinitions = [],
     users = [],
+    // When present, the Project chip becomes an inline editor: clicking it
+    // opens a project picker and the callback applies {project_id, inherit_project}.
+    oneditproject = null,
+    // Resolves the inheritance-aware project for items that inherit from a
+    // parent, so the chip shows the project grouping the lane uses.
+    resolveEffectiveProject = null,
   } = $props();
 
   let customFieldId = $derived(
@@ -70,6 +79,55 @@
     }
     return [];
   });
+
+  // Effective project for the chip: direct project first, then the resolved
+  // inherited project, so the chip matches the lane grouping.
+  let effectiveProject = $derived.by(() => {
+    const resolved = resolveEffectiveProject ? resolveEffectiveProject(item) : null;
+    if (resolved) {
+      return (
+        projects.find((project) => project.id === resolved.id) ||
+        (resolved.name ? { id: resolved.id, name: resolved.name } : null)
+      );
+    }
+    if (item.project_id != null) {
+      return projects.find((project) => project.id === item.project_id) ||
+        (item.project_name ? { id: item.project_id, name: item.project_name } : null);
+    }
+    return null;
+  });
+
+  let projectChipTitle = $derived(
+    effectiveProject?.name ||
+      item.project_name ||
+      (item.inherit_project ? t('items.inheritProject') : t('items.noProject'))
+  );
+
+  let projectPickerItems = $derived.by(() => {
+    const list = [{ id: 'none', name: t('common.none'), specialType: 'none' }];
+    if (item.parent_id || item.inherit_project) {
+      list.push({ id: 'inherit', name: t('items.inheritProject'), specialType: 'inherit' });
+    }
+    list.push(...projects);
+    return list;
+  });
+
+  let projectPickerValue = $derived.by(() => {
+    if (item.inherit_project && !item.project_id) return 'inherit';
+    if (item.project_id == null) return 'none';
+    return item.project_id;
+  });
+
+  function handleProjectSelect(selected) {
+    if (!selected || !oneditproject) return;
+    if (selected.specialType === 'none') {
+      oneditproject(item, { project_id: null, inherit_project: false });
+    } else if (selected.specialType === 'inherit') {
+      oneditproject(item, { project_id: null, inherit_project: true });
+    } else {
+      oneditproject(item, { project_id: selected.id, inherit_project: false });
+    }
+  }
 </script>
 
 {#if cardField.field_type === 'system'}
@@ -135,12 +193,35 @@
     <Chip appearance="metadata" icon={CalendarDays} title="Created">
       {formatDateShort(item.created_at)}
     </Chip>
-  {:else if cardField.field_identifier === 'project' && item.project_id}
-    {@const proj = projects.find(p => p.id === item.project_id)}
-    {#if proj}
-      <Chip appearance="metadata" title="Project">
-        {proj.name}
-      </Chip>
+  {:else if cardField.field_identifier === 'project'}
+    {#if oneditproject}
+      <ItemPicker
+        value={projectPickerValue}
+        items={projectPickerItems}
+        config={projectPickerConfig}
+        showUnassigned={false}
+        allowClear={false}
+        onSelect={handleProjectSelect}
+      >
+        {#snippet children()}
+          <span
+            class="inline-flex cursor-pointer transition-opacity hover:opacity-80"
+            data-testid={`board-card-project-chip-${item.id}`}
+            title={t('items.project')}
+          >
+            <Chip appearance="metadata" icon={Briefcase} title={t('items.project')}>
+              {projectChipTitle}
+            </Chip>
+          </span>
+        {/snippet}
+      </ItemPicker>
+    {:else if item.project_id}
+      {@const proj = projects.find(p => p.id === item.project_id)}
+      {#if proj}
+        <Chip appearance="metadata" title="Project">
+          {proj.name}
+        </Chip>
+      {/if}
     {/if}
   {:else if cardField.field_identifier === 'parent' && item.parent_id}
     <ParentChip {item} maxWidth="12rem" />
