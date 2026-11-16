@@ -288,7 +288,7 @@ func (r *CollectionRepository) Update(id int, collection *models.Collection) err
 // expectedQuery and expectedWorkspaceID, so a concurrent query edit cannot
 // publish a scope that was never authorized. The bool reports whether the row
 // still matched.
-func (r *CollectionRepository) UpdatePublicSharing(id int, isPublic bool, publicSlug *string, publicMilestoneSwimlanes bool, publicGroupBy string, expectedQuery string, expectedWorkspaceID *int) (bool, error) {
+func (r *CollectionRepository) UpdatePublicSharing(id int, isPublic bool, publicSlug *string, publicMilestoneSwimlanes bool, publicGroupBy, expectedQuery string, expectedWorkspaceID *int) (bool, error) {
 	query := "UPDATE collections SET is_public = ?, public_slug = ?, public_milestone_swimlanes = ?, public_group_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
 	args := []any{isPublic, publicSlug, publicMilestoneSwimlanes, publicGroupBy, id}
 	if isPublic {

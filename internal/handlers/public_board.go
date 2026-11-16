@@ -901,15 +901,16 @@ func buildPublicBoardLanes(groupBy string, columns []boardColumnInfo, responseCo
 					continue
 				}
 				if _, ok := titles[key]; !ok {
-					if groupBy == "assignee" {
+					switch {
+					case groupBy == "assignee":
 						if card.AssigneeName != "" {
 							titles[key] = card.AssigneeName
 						} else {
 							titles[key] = "Unassigned"
 						}
-					} else if card.ProjectName != "" {
+					case card.ProjectName != "":
 						titles[key] = card.ProjectName
-					} else {
+					default:
 						titles[key] = "Project #" + strings.TrimPrefix(key, "project-")
 					}
 				}
@@ -1151,7 +1152,7 @@ func (h *PublicBoardHandler) loadItemLabels(items []models.Item) map[int][]publi
 	return result
 }
 
-func (h *PublicBoardHandler) buildEmptyResponse(name, desc string, columns []boardColumnInfo, cardFields []models.ListColumn, updatedAt string, groupBy string) publicBoardResponse {
+func (h *PublicBoardHandler) buildEmptyResponse(name, desc string, columns []boardColumnInfo, cardFields []models.ListColumn, updatedAt, groupBy string) publicBoardResponse {
 	resp := publicBoardResponse{
 		CardFields: cardFields,
 		Swimlanes:  groupBy == "milestone",
