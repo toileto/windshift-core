@@ -1,3 +1,20 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "toileto",
+      "id": 33114786,
+      "comment_id": 6912233053,
+      "created_at": "2026-11-16T09:12:59Z",
+      "repoId": 1459528707,
+      "pullRequestNo": 1
+    },
+    {
+      "name": "toileto",
+      "id": 33114786,
+      "comment_id": 6912661989,
+      "created_at": "2026-11-16T09:32:38Z",
+      "repoId": 1459528707,
+      "pullRequestNo": 1
+    }
+  ]
 }
